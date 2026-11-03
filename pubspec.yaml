@@ -1,0 +1,20 @@
+name: video_organizer
+description: Videos aus Ordnern organisieren, Intervalle taggen, bewerten und als Zusammenschnitt ansehen.
+publish_to: 'none'
+version: 1.0.0
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  media_kit: ^1.1.11
+  media_kit_video: ^1.2.5
+  media_kit_libs_video: ^1.0.5
+  file_picker: ^8.1.2
+  path_provider: ^2.1.4
+  path: ^1.9.0
+
+flutter:
+  uses-material-design: true
