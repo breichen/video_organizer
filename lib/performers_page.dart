@@ -3,7 +3,9 @@ import 'package:path/path.dart' as p;
 
 import 'player_page.dart';
 import 'store.dart';
-import 'supercut_page.dart';
+import 'thumb_widgets.dart';
+import 'clip_filter.dart';
+import 'cuts_hub_page.dart';
 
 /// Liste aller DarstellerInnen (links) und ihrer Videos (rechts) –
 /// mit Umbenennen, Synonymen und Zusammenführen.
@@ -74,7 +76,6 @@ class _PerformersPageState extends State<PerformersPage> {
       ),
     );
     final newName = c.text.trim();
-    c.dispose();
     if (ok != true || newName.isEmpty || newName == old) return;
 
     final conflict = store.performerConflict(old, newName);
@@ -205,7 +206,6 @@ class _PerformersPageState extends State<PerformersPage> {
         ),
       ),
     );
-    c.dispose();
   }
 
   @override
@@ -333,9 +333,10 @@ class _PerformersPageState extends State<PerformersPage> {
                                               onPressed: () => Navigator.push(
                                                 context,
                                                 MaterialPageRoute(
-                                                  builder: (_) => SupercutPage(
+                                                  builder: (_) => CutsHubPage(
                                                     store: store,
-                                                    initialPerformer: sel,
+                                                    initialTab: 1,
+                                                    initialFilter: ClipFilter(performer: sel),
                                                   ),
                                                 ),
                                               ),
@@ -359,7 +360,7 @@ class _PerformersPageState extends State<PerformersPage> {
                                           itemBuilder: (_, i) {
                                             final v = vids[i];
                                             return ListTile(
-                                              leading: const Icon(Icons.movie),
+                                              leading: VideoThumb(store: store, path: v, width: 96, height: 54),
                                               title: Text(store.displayName(v)),
                                               subtitle: Text(
                                                 store.titleFor(v).isNotEmpty

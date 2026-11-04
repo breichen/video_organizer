@@ -7,7 +7,8 @@ import 'folder_import_dialog.dart';
 import 'performers_page.dart';
 import 'player_page.dart';
 import 'store.dart';
-import 'supercut_page.dart';
+import 'thumb_widgets.dart';
+import 'cuts_hub_page.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -116,10 +117,10 @@ class _LibraryPageState extends State<LibraryPage> {
                 child: FilledButton.icon(
                   onPressed: () => Navigator.push(
                     context,
-                    MaterialPageRoute(builder: (_) => SupercutPage(store: store)),
+                    MaterialPageRoute(builder: (_) => CutsHubPage(store: store)),
                   ),
-                  icon: const Icon(Icons.shuffle),
-                  label: const Text('Zufalls-Zusammenschnitt'),
+                  icon: const Icon(Icons.movie_filter),
+                  label: const Text('Clips & Zusammenschnitte'),
                 ),
               ),
             ],
@@ -223,7 +224,7 @@ class _LibraryPageState extends State<LibraryPage> {
                                 final v = videos[i];
                                 final n = store.segmentsFor(v).length;
                                 return ListTile(
-                                  leading: const Icon(Icons.movie),
+                                  leading: VideoThumb(store: store, path: v),
                                   title: Text(store.displayName(v)),
                                   subtitle: Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,

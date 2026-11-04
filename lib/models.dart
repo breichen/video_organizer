@@ -194,3 +194,50 @@ class FilenamePattern {
         titleCase: (j['titleCase'] ?? true) as bool,
       );
 }
+
+/// Ein gespeicherter Zusammenschnitt: geordnete Liste von Clip-IDs (zufällig oder eigen).
+class SavedCut {
+  final String id;
+  String name;
+
+  /// 'random' oder 'custom'
+  String kind;
+  List<String> clipIds;
+  final int createdMs;
+  String description;
+
+  SavedCut({
+    required this.id,
+    required this.name,
+    required this.kind,
+    required this.clipIds,
+    required this.createdMs,
+    this.description = '',
+  });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'kind': kind,
+        'clipIds': clipIds,
+        'createdMs': createdMs,
+        'description': description,
+      };
+
+  factory SavedCut.fromJson(Map<String, dynamic> j) => SavedCut(
+        id: j['id'] as String,
+        name: (j['name'] ?? '') as String,
+        kind: (j['kind'] ?? 'custom') as String,
+        clipIds: List<String>.from(j['clipIds'] ?? const <String>[]),
+        createdMs: (j['createdMs'] ?? 0) as int,
+        description: (j['description'] ?? '') as String,
+      );
+}
+
+/// Kurzform für Gesamtdauern: m:ss bzw. h:mm:ss
+String fmtShort(Duration d) {
+  final h = d.inHours;
+  final m = d.inMinutes.remainder(60).toString().padLeft(h > 0 ? 2 : 1, '0');
+  final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+  return h > 0 ? '$h:$m:$s' : '$m:$s';
+}

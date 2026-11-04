@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import 'models.dart';
+import 'thumbnail_service.dart';
 
 const videoExtensions = {
   '.mp4', '.mkv', '.mov', '.avi', '.webm', '.m4v', '.wmv', '.flv', '.mpg', '.mpeg',
@@ -43,10 +44,30 @@ class Store extends ChangeNotifier {
   /// Synonyme: Schreibweise → Hauptname (z. B. "Bella S." → "Bella Spark").
   Map<String, String> performerAliases = {};
 
+  /// Gespeicherte Zusammenschnitte (zufällige und eigene).
+  List<SavedCut> savedCuts = [];
+
+  /// Entwurf für einen eigenen Zusammenschnitt: Clip-IDs in Reihenfolge.
+  List<String> draft = [];
+
+  /// Gesetzt, wenn ein gespeicherter Zusammenschnitt bearbeitet wird.
+  String? draftCutId;
+  String draftName = '';
+
+  /// Zählt hoch, wenn der Entwurf ersetzt wird (nicht beim normalen Bearbeiten).
+  int draftSerial = 0;
+
   /// Lautstärke 0–100
   double volume = 100;
 
   bool scanning = false;
+
+  /// Position (ms) des Thumbnail-Bildes pro Video: zufällig gewählt oder vom Anwender bestimmt.
+  Map<String, int> videoThumbMs = {};
+
+  /// Erzeugt und cached Thumbnails (nach load() verfügbar).
+  ThumbnailService? thumbs;
+  Timer? _saveTimer;
 
   File? _file;
   int _scanId = 0;
@@ -77,6 +98,17 @@ class Store extends ChangeNotifier {
                 FilenamePattern.fromJson(Map<String, dynamic>.from(e.value as Map)),
         };
         autoParsed = Set<String>.from(j['autoParsed'] ?? const <String>[]);
+        videoThumbMs = {
+          for (final e in (j['videoThumbMs'] as Map? ?? const {}).entries)
+            e.key as String: (e.value as num).toInt(),
+        };
+        savedCuts = [
+          for (final e in (j['savedCuts'] as List? ?? const []))
+            SavedCut.fromJson(Map<String, dynamic>.from(e as Map)),
+        ];
+        draft = List<String>.from(j['draft'] ?? const <String>[]);
+        draftCutId = j['draftCutId'] as String?;
+        draftName = (j['draftName'] ?? '') as String;
         videoSeries = {
           for (final e in (j['videoSeries'] as Map? ?? const {}).entries)
             e.key as String: e.value as String,
@@ -99,6 +131,11 @@ class Store extends ChangeNotifier {
     }
     notifyListeners();
     _invalidate();
+    try {
+      thumbs = await ThumbnailService.create();
+    } catch (_) {
+      // ohne Thumbnails weiterarbeiten
+    }
     unawaited(scan()); // läuft im Hintergrund
   }
 
@@ -114,6 +151,11 @@ class Store extends ChangeNotifier {
         for (final e in folderPatterns.entries) e.key: e.value.toJson(),
       },
       'autoParsed': autoParsed.toList(),
+      'videoThumbMs': videoThumbMs,
+      'savedCuts': [for (final c in savedCuts) c.toJson()],
+      'draft': draft,
+      'draftCutId': draftCutId,
+      'draftName': draftName,
       'videoSeries': videoSeries,
       'folderSeries': folderSeries,
       'performerAliases': performerAliases,
@@ -257,6 +299,7 @@ class Store extends ChangeNotifier {
     _aliasMap = null;
     _aliasGroups = null;
     _allPerformersCache = null;
+    _segMap = null;
   }
 
   Map<String, String> get _aliasLower => _aliasMap ??= {
@@ -464,6 +507,153 @@ class Store extends ChangeNotifier {
   Future<void> removeAlias(String alias) async {
     performerAliases.remove(alias);
     _invalidate();
+    await changed();
+  }
+
+  // ---- Thumbnails ----
+
+  void _saveSoon() {
+    _saveTimer?.cancel();
+    _saveTimer = Timer(const Duration(seconds: 2), save);
+  }
+
+  /// Merkt die zufällig gewählte Position (ohne die Oberfläche neu aufzubauen).
+  void pickVideoThumbQuiet(String path, int ms) {
+    videoThumbMs[path] = ms;
+    _saveSoon();
+  }
+
+  /// Der Anwender wählt ein bestimmtes Bild als Video-Thumbnail.
+  Future<void> setVideoThumb(String path, int ms) async {
+    videoThumbMs[path] = ms;
+    await changed();
+  }
+
+  /// Zurück zu einem (neuen) zufälligen Bild.
+  Future<void> resetVideoThumb(String path) async {
+    videoThumbMs.remove(path);
+    await changed();
+  }
+
+  // ---- Zusammenschnitte (Entwurf und gespeicherte) ----
+
+  Map<String, Segment>? _segMap;
+
+  Segment? segmentById(String id) {
+    _segMap ??= {for (final s in segments) s.id: s};
+    return _segMap![id];
+  }
+
+  /// Clips zu den IDs, in Reihenfolge; fehlende (gelöschte) werden übersprungen.
+  List<Segment> resolveClips(List<String> ids) => [
+        for (final id in ids)
+          if (segmentById(id) != null) segmentById(id)!,
+      ];
+
+  /// Die Clips des Entwurfs. Gelöschte Clips werden still aus dem Entwurf entfernt,
+  /// damit Positionen im Entwurf und in der Liste übereinstimmen.
+  List<Segment> draftClips() {
+    draft.removeWhere((id) => segmentById(id) == null);
+    return resolveClips(draft);
+  }
+
+  Future<void> draftToggle(String id) async {
+    if (!draft.remove(id)) draft.add(id);
+    await changed();
+  }
+
+  Future<void> draftAdd(Iterable<String> ids) async {
+    for (final id in ids) {
+      if (!draft.contains(id)) draft.add(id);
+    }
+    await changed();
+  }
+
+  Future<void> draftRemoveAt(int index) async {
+    if (index < 0 || index >= draft.length) return;
+    draft.removeAt(index);
+    await changed();
+  }
+
+  /// Für ReorderableListView.onReorder.
+  Future<void> draftMove(int oldIndex, int newIndex) async {
+    if (newIndex > oldIndex) newIndex -= 1;
+    final id = draft.removeAt(oldIndex);
+    draft.insert(newIndex, id);
+    await changed();
+  }
+
+  Future<void> draftShuffle() async {
+    draft.shuffle();
+    await changed();
+  }
+
+  /// Ersetzt den Entwurf (z. B. beim Bearbeiten eines gespeicherten Zusammenschnitts).
+  Future<void> setDraft(List<String> ids, {String? cutId, String name = ''}) async {
+    draft = List<String>.of(ids);
+    draftCutId = cutId;
+    draftName = name;
+    draftSerial++;
+    await changed();
+  }
+
+  /// Speichert den Entwurf: ändert den bearbeiteten Zusammenschnitt oder legt einen neuen an.
+  Future<SavedCut> saveDraft({required String name, bool asNew = false}) async {
+    final n = name.trim();
+    final existing = (!asNew && draftCutId != null)
+        ? savedCuts.where((c) => c.id == draftCutId).firstOrNull
+        : null;
+    final SavedCut cut;
+    if (existing != null) {
+      existing.name = n;
+      existing.clipIds = List<String>.of(draft);
+      existing.kind = 'custom';
+      cut = existing;
+    } else {
+      cut = SavedCut(
+        id: DateTime.now().microsecondsSinceEpoch.toString(),
+        name: n,
+        kind: 'custom',
+        clipIds: List<String>.of(draft),
+        createdMs: DateTime.now().millisecondsSinceEpoch,
+      );
+      savedCuts.add(cut);
+    }
+    draftCutId = cut.id;
+    draftName = n;
+    await changed();
+    return cut;
+  }
+
+  Future<SavedCut> addSavedCut({
+    required String name,
+    required String kind,
+    required List<String> clipIds,
+    String description = '',
+  }) async {
+    final cut = SavedCut(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      name: name.trim(),
+      kind: kind,
+      clipIds: List<String>.of(clipIds),
+      createdMs: DateTime.now().millisecondsSinceEpoch,
+      description: description,
+    );
+    savedCuts.add(cut);
+    await changed();
+    return cut;
+  }
+
+  Future<void> renameSavedCut(String id, String name) async {
+    for (final c in savedCuts) {
+      if (c.id == id) c.name = name.trim();
+    }
+    await changed();
+  }
+
+  Future<void> deleteSavedCut(String id) async {
+    savedCuts.removeWhere((c) => c.id == id);
+    if (draftCutId == id) draftCutId = null;
     await changed();
   }
 

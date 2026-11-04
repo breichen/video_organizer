@@ -6,6 +6,7 @@ import 'cuts_tabs.dart';
 import 'models.dart';
 import 'player_page.dart';
 import 'store.dart';
+import 'thumb_widgets.dart';
 import 'widgets.dart';
 
 /// Clips & Zusammenschnitte: Übersicht, Zufall, eigener Entwurf, gespeicherte.
@@ -127,10 +128,21 @@ class _ClipsTabState extends State<ClipsTab> {
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       child: ListTile(
-        leading: IconButton(
-          tooltip: 'Im Player ansehen',
-          icon: const Icon(Icons.play_circle),
-          onPressed: () => _openInPlayer(s),
+        leading: Tooltip(
+          message: 'Im Player ansehen',
+          child: GestureDetector(
+            onTap: () => _openInPlayer(s),
+            child: MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: ClipThumb(
+                store: store,
+                segment: s,
+                overlay: const Center(
+                  child: Icon(Icons.play_circle, color: Colors.white70, size: 28),
+                ),
+              ),
+            ),
+          ),
         ),
         title: Text('${store.displayName(s.videoPath)}  ·  ${fmt(s.start)}–${fmt(s.end)}'),
         subtitle: Column(

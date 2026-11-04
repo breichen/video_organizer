@@ -7,6 +7,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import 'models.dart';
 import 'store.dart';
+import 'thumb_widgets.dart';
 import 'widgets.dart';
 
 int _clampInt(int v, int lo, int hi) => hi < lo ? lo : (v < lo ? lo : (v > hi ? hi : v));
@@ -14,7 +15,15 @@ int _clampInt(int v, int lo, int hi) => hi < lo ? lo : (v < lo ? lo : (v > hi ? 
 class PlayerPage extends StatefulWidget {
   final Store store;
   final String path;
-  const PlayerPage({super.key, required this.store, required this.path});
+
+  /// Wenn gesetzt: dieses Intervall direkt abspielen (z. B. aus der Clip-Übersicht).
+  final Segment? initialSegment;
+  const PlayerPage({
+    super.key,
+    required this.store,
+    required this.path,
+    this.initialSegment,
+  });
 
   @override
   State<PlayerPage> createState() => _PlayerPageState();
@@ -54,7 +63,7 @@ class _PlayerPageState extends State<PlayerPage> {
     super.initState();
     _titleCtrl.text = widget.store.titleFor(widget.path);
     _seriesCtrl.text = widget.store.seriesFor(widget.path);
-    player.open(Media(widget.path), play: false);
+    _openAndMaybeSeek();
     _durSub = player.stream.duration.listen((_) {
       if (mounted) setState(() {});
     });
@@ -87,6 +96,18 @@ class _PlayerPageState extends State<PlayerPage> {
     _seriesCtrl.dispose();
     _editTagCtrl.dispose();
     super.dispose();
+  }
+
+  Future<void> _openAndMaybeSeek() async {
+    await player.open(Media(widget.path), play: false);
+    final s = widget.initialSegment;
+    if (s == null || !mounted) return;
+    if (player.state.duration == Duration.zero) {
+      await player.stream.duration
+          .firstWhere((d) => d > Duration.zero)
+          .timeout(const Duration(seconds: 5), onTimeout: () => Duration.zero);
+    }
+    if (mounted) await _playSegment(s);
   }
 
   // ---------- Navigation im Video ----------
@@ -421,6 +442,36 @@ class _PlayerPageState extends State<PlayerPage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text('Video-Infos', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          ExcludeFocus(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                VideoThumb(store: widget.store, path: widget.path, width: 128, height: 72),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: () => widget.store.setVideoThumb(
+                          widget.path,
+                          player.state.position.inMilliseconds,
+                        ),
+                        icon: const Icon(Icons.image),
+                        label: const Text('Aktuelles Bild nehmen'),
+                      ),
+                      TextButton.icon(
+                        onPressed: () => widget.store.resetVideoThumb(widget.path),
+                        icon: const Icon(Icons.casino),
+                        label: const Text('Zufälliges Bild'),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
           const SizedBox(height: 8),
           TextField(
             controller: _titleCtrl,

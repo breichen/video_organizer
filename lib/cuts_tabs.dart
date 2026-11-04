@@ -4,6 +4,7 @@ import 'cut_player_page.dart';
 import 'models.dart';
 import 'player_page.dart';
 import 'store.dart';
+import 'thumb_widgets.dart';
 
 String _fmtDate(int ms) {
   final d = DateTime.fromMillisecondsSinceEpoch(ms);
@@ -197,7 +198,14 @@ class _DraftTabState extends State<DraftTab> {
                           key: ValueKey(s.id),
                           leading: ReorderableDragStartListener(
                             index: i,
-                            child: const Icon(Icons.drag_handle),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.drag_handle),
+                                const SizedBox(width: 8),
+                                ClipThumb(store: store, segment: s, width: 80, height: 45),
+                              ],
+                            ),
                           ),
                           title: Text(
                             '${i + 1}. ${store.displayName(s.videoPath)}  ·  '
