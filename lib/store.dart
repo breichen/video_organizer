@@ -98,6 +98,7 @@ class Store extends ChangeNotifier {
       }
     }
     notifyListeners();
+    _invalidate();
     unawaited(scan()); // läuft im Hintergrund
   }
 
@@ -122,6 +123,7 @@ class Store extends ChangeNotifier {
 
   /// Speichert und benachrichtigt nach Änderungen.
   Future<void> changed() async {
+    _invalidate();
     await save();
     notifyListeners();
   }
@@ -152,6 +154,7 @@ class Store extends ChangeNotifier {
       ..sort((a, b) => p.basename(a).toLowerCase().compareTo(p.basename(b).toLowerCase()));
     scanning = false;
     final dirty = _autoApplyPatterns();
+    if (dirty) _invalidate();
     notifyListeners();
     if (dirty) await save();
   }
@@ -240,164 +243,227 @@ class Store extends ChangeNotifier {
   }
 
   // ---- DarstellerInnen ----
+  //
+  // In den Videos stehen die Namen so, wie sie eingegeben bzw. aus dem Dateinamen gelesen
+  // wurden (Originalnamen). Welche Namen dieselbe Person sind, steht getrennt in
+  // [performerAliases] (Schreibweise → Hauptname). So lassen sich Umbenennen und
+  // Zusammenführen rückgängig machen, indem man den Eintrag dort entfernt.
 
-  List<String> performersFor(String path) => performers[path] ?? const <String>[];
+  Map<String, String>? _aliasMap; // klein geschrieben: Synonym → Ziel
+  Map<String, List<String>>? _aliasGroups; // Hauptname (klein) → Synonyme
+  List<String>? _allPerformersCache;
 
-  /// Alle DarstellerInnen, alphabetisch.
-  List<String> get allPerformers => performers.values.expand((e) => e).toSet().toList()
-    ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
-
-  /// Gleiche Namen (ohne Beachtung der Groß-/Kleinschreibung) übernehmen die vorhandene Schreibweise.
-  String _canonicalPerformer(String name) {
-    final lower = name.toLowerCase();
-    for (final existing in allPerformers) {
-      if (existing.toLowerCase() == lower) return existing;
-    }
-    return name;
+  void _invalidate() {
+    _aliasMap = null;
+    _aliasGroups = null;
+    _allPerformersCache = null;
   }
 
+  Map<String, String> get _aliasLower => _aliasMap ??= {
+        for (final e in performerAliases.entries) e.key.toLowerCase(): e.value,
+      };
+
+  /// Folgt der Kette der Synonyme bis zum Hauptnamen.
+  String _follow(String name) {
+    var cur = name.trim();
+    final seen = <String>{};
+    while (true) {
+      final low = cur.toLowerCase();
+      if (!seen.add(low)) return cur; // Zyklus-Schutz
+      final next = _aliasLower[low];
+      if (next == null) return cur;
+      cur = next;
+    }
+  }
+
+  Map<String, List<String>> get _groups => _aliasGroups ??= () {
+        final m = <String, List<String>>{};
+        for (final k in performerAliases.keys) {
+          final root = _follow(k).toLowerCase();
+          if (root == k.toLowerCase()) continue;
+          (m[root] ??= <String>[]).add(k);
+        }
+        for (final l in m.values) {
+          l.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+        }
+        return m;
+      }();
+
+  /// Löst einen Namen über die Synonyme zum Hauptnamen auf.
+  String resolvePerformer(String name) => _follow(name);
+
+  /// Die Originalnamen, wie sie beim Video gespeichert sind.
+  List<String> rawPerformersFor(String path) => performers[path] ?? const <String>[];
+
+  /// DarstellerInnen eines Videos (Synonyme aufgelöst, ohne Doppelte).
+  List<String> performersFor(String path) {
+    final raw = performers[path];
+    if (raw == null || raw.isEmpty) return const <String>[];
+    final out = <String>[];
+    for (final r in raw) {
+      final n = _follow(r);
+      if (!out.any((e) => e.toLowerCase() == n.toLowerCase())) out.add(n);
+    }
+    return out;
+  }
+
+  /// Alle Personen (Synonyme aufgelöst), alphabetisch.
+  List<String> get allPerformers => _allPerformersCache ??= () {
+        final m = <String, String>{};
+        for (final raw in performers.values) {
+          for (final r in raw) {
+            final n = _follow(r);
+            m.putIfAbsent(n.toLowerCase(), () => n);
+          }
+        }
+        return m.values.toList()
+          ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+      }();
+
+  /// Trägt Namen als Originalnamen beim Video ein (Schreibweise wie bereits vorhanden).
+  /// Ist dieselbe Person (auch über ein Synonym) schon eingetragen, wird nichts doppelt.
   Future<void> addPerformers(String path, List<String> names) async {
+    final spell = _performerLookup();
     final cur = List<String>.from(performers[path] ?? const <String>[]);
     for (final n in names) {
-      final c = resolvePerformer(n);
-      if (!cur.any((e) => e.toLowerCase() == c.toLowerCase())) cur.add(c);
+      final c = spell.putIfAbsent(n.toLowerCase(), () => n);
+      final target = _follow(c).toLowerCase();
+      if (!cur.any((e) => _follow(e).toLowerCase() == target)) cur.add(c);
     }
     if (cur.isEmpty) return;
     performers[path] = cur;
     await changed();
   }
 
+  /// Entfernt eine Person von einem Video (alle Originalnamen, die zu ihr gehören).
   Future<void> removePerformer(String path, String name) async {
     final cur = performers[path];
     if (cur == null) return;
-    cur.remove(name);
+    final target = name.toLowerCase();
+    cur.removeWhere((r) => _follow(r).toLowerCase() == target);
     if (cur.isEmpty) performers.remove(path);
     await changed();
   }
 
   /// Videos (aus den aktuell eingelesenen Ordnern) mit dieser Person.
-  List<String> videosWithPerformer(String name) =>
-      videos.where((v) => performersFor(v).contains(name)).toList();
+  List<String> videosWithPerformer(String name) {
+    final lower = name.toLowerCase();
+    return videos
+        .where((v) => performersFor(v).any((n) => n.toLowerCase() == lower))
+        .toList();
+  }
 
   /// Anzahl eingelesener Videos pro Person.
   Map<String, int> performerCounts() {
+    final spell = {for (final n in allPerformers) n.toLowerCase(): n};
     final m = <String, int>{for (final n in allPerformers) n: 0};
     for (final v in videos) {
       for (final n in performersFor(v)) {
-        m[n] = (m[n] ?? 0) + 1;
+        final key = spell[n.toLowerCase()] ?? n;
+        m[key] = (m[key] ?? 0) + 1;
       }
     }
     return m;
   }
 
-  // ---- Umbenennen, Zusammenführen, Synonyme ----
+  // ---- Umbenennen, Zusammenführen, Synonyme (alles rückgängig machbar) ----
 
-  /// Löst einen eingegebenen Namen auf: Synonym → Hauptname, sonst vorhandene Schreibweise.
-  String resolvePerformer(String name) {
-    final n = name.trim();
-    final lower = n.toLowerCase();
-    for (final e in performerAliases.entries) {
-      if (e.key.toLowerCase() == lower) return e.value;
-    }
-    for (final existing in allPerformers) {
-      if (existing.toLowerCase() == lower) return existing;
-    }
-    return n;
-  }
-
-  /// Synonyme einer Person.
+  /// Synonyme einer Person (alle Schreibweisen, die über Synonyme zu ihr führen).
   List<String> aliasesOf(String name) {
     if (performerAliases.isEmpty) return const <String>[];
-    final lower = name.toLowerCase();
-    return [
-      for (final e in performerAliases.entries)
-        if (e.value.toLowerCase() == lower) e.key,
-    ]..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    return _groups[_follow(name).toLowerCase()] ?? const <String>[];
   }
 
   bool _isKnownName(String name) {
-    final lower = name.trim().toLowerCase();
-    return performerAliases.keys.any((k) => k.toLowerCase() == lower) ||
-        allPerformers.any((e) => e.toLowerCase() == lower);
+    final low = name.trim().toLowerCase();
+    if (_aliasLower.containsKey(low)) return true;
+    if (performerAliases.values.any((v) => v.toLowerCase() == low)) return true;
+    return allPerformers.any((e) => e.toLowerCase() == low);
   }
 
   /// Gibt es den neuen Namen schon für eine ANDERE Person (oder als deren Synonym)?
   /// Dann deren Hauptname, sonst null.
   String? performerConflict(String old, String newName) {
     if (!_isKnownName(newName)) return null;
-    final target = resolvePerformer(newName);
-    return target.toLowerCase() == old.toLowerCase() ? null : target;
+    final target = _follow(newName);
+    return target.toLowerCase() == _follow(old).toLowerCase() ? null : target;
   }
 
-  void _replacePerformer(String from, String to) {
-    final lower = from.toLowerCase();
+  /// Nur Groß-/Kleinschreibung ändern: passt die Schreibweise überall an.
+  void _respell(String from, String to) {
+    final low = from.toLowerCase();
     for (final path in performers.keys.toList()) {
-      final cur = performers[path]!;
-      if (!cur.any((e) => e.toLowerCase() == lower)) continue;
       final next = <String>[];
-      for (final e in cur) {
-        final v = e.toLowerCase() == lower ? to : e;
+      for (final r in performers[path]!) {
+        final v = r.toLowerCase() == low ? to : r;
         if (!next.any((x) => x.toLowerCase() == v.toLowerCase())) next.add(v);
       }
       performers[path] = next;
     }
+    for (final k in performerAliases.keys.toList()) {
+      if (performerAliases[k]!.toLowerCase() == low) performerAliases[k] = to;
+      if (k.toLowerCase() == low) performerAliases[to] = performerAliases.remove(k)!;
+    }
+    _invalidate();
   }
 
-  /// Benennt eine Person in allen Videos um. Existiert der neue Name schon, wird
-  /// zusammengeführt. Gibt den resultierenden Namen zurück.
-  Future<String> renamePerformer(String old, String newName,
-      {bool keepOldAsAlias = true}) async {
+  /// Benennt eine Person um. Die Videos behalten ihre Originalnamen; der bisherige Name
+  /// wird Synonym des neuen (rückgängig: Synonym entfernen). Existiert der neue Name schon
+  /// bei einer anderen Person, werden beide zusammengeführt. Gibt den neuen Namen zurück.
+  Future<String> renamePerformer(String old, String newName) async {
     final n = newName.trim();
-    if (n.isEmpty) return old;
-    final conflict = performerConflict(old, n);
+    final root = _follow(old);
+    if (n.isEmpty) return root;
+    final conflict = performerConflict(root, n);
     if (conflict != null) {
-      await mergePerformers(from: old, into: conflict);
+      await mergePerformers(from: root, into: conflict);
       return conflict;
     }
-    final caseOnly = n.toLowerCase() == old.toLowerCase();
-    _replacePerformer(old, n);
-    for (final k in performerAliases.keys.toList()) {
-      if (performerAliases[k]!.toLowerCase() == old.toLowerCase()) performerAliases[k] = n;
+    if (n.toLowerCase() == root.toLowerCase()) {
+      _respell(root, n);
+      await changed();
+      return n;
     }
+    // Der neue Name war evtl. schon ein Synonym derselben Person: Rollen tauschen.
     performerAliases.removeWhere((k, v) => k.toLowerCase() == n.toLowerCase());
-    if (keepOldAsAlias && !caseOnly) performerAliases[old] = n;
+    performerAliases[root] = n;
+    _invalidate();
     await changed();
     return n;
   }
 
-  /// Führt [from] in [into] zusammen: alle Videos von [from] gehören danach zu [into],
-  /// und [from] wird als Synonym von [into] gemerkt.
+  /// Führt [from] mit [into] zusammen. Die Videos bleiben unverändert; nur die Gleichsetzung
+  /// wird in [performerAliases] vermerkt (rückgängig: Synonym entfernen).
   Future<void> mergePerformers({required String from, required String into}) async {
-    if (from.toLowerCase() == into.toLowerCase()) return;
-    _replacePerformer(from, into);
-    for (final k in performerAliases.keys.toList()) {
-      if (performerAliases[k]!.toLowerCase() == from.toLowerCase()) performerAliases[k] = into;
-    }
-    performerAliases.removeWhere(
-      (k, v) =>
-          k.toLowerCase() == into.toLowerCase() || k.toLowerCase() == from.toLowerCase(),
-    );
-    performerAliases[from] = into;
+    final a = _follow(from);
+    final b = _follow(into);
+    if (a.toLowerCase() == b.toLowerCase()) return;
+    performerAliases[a] = b;
+    _invalidate();
     await changed();
   }
 
-  /// Fügt [alias] als Synonym von [canonical] hinzu. Gibt es [alias] schon als eigene
-  /// Person, werden beide zusammengeführt.
+  /// Fügt [alias] als Synonym von [canonical] hinzu. Ist [alias] schon eine eigene Person,
+  /// werden beide zusammengeführt.
   Future<void> addAlias(String canonical, String alias) async {
     final a = alias.trim();
-    if (a.isEmpty || a.toLowerCase() == canonical.toLowerCase()) return;
-    final existing = allPerformers.where((e) => e.toLowerCase() == a.toLowerCase());
-    if (existing.isNotEmpty) {
-      await mergePerformers(from: existing.first, into: canonical);
+    final root = _follow(canonical);
+    if (a.isEmpty || a.toLowerCase() == root.toLowerCase()) return;
+    final other = _follow(a);
+    if (other.toLowerCase() == root.toLowerCase()) return; // schon dieselbe Person
+    if (_isKnownName(a)) {
+      await mergePerformers(from: other, into: root);
       return;
     }
-    performerAliases.removeWhere((k, v) => k.toLowerCase() == a.toLowerCase());
-    performerAliases[a] = canonical;
+    performerAliases[a] = root;
+    _invalidate();
     await changed();
   }
 
+  /// Entfernt ein Synonym: die Schreibweise gilt wieder als eigene Person.
   Future<void> removeAlias(String alias) async {
     performerAliases.remove(alias);
+    _invalidate();
     await changed();
   }
 
@@ -504,10 +570,22 @@ class Store extends ChangeNotifier {
     return best;
   }
 
-  Map<String, String> _performerLookup() => {
-        for (final n in allPerformers) n.toLowerCase(): n,
-        for (final e in performerAliases.entries) e.key.toLowerCase(): e.value,
-      };
+  /// Schreibweisen aller bekannten Namen (Originalnamen in Videos, Synonyme und deren
+  /// Hauptnamen): klein geschrieben → Schreibweise. Neue Eingaben übernehmen so die
+  /// vorhandene Schreibweise.
+  Map<String, String> _performerLookup() {
+    final m = <String, String>{};
+    for (final raw in performers.values) {
+      for (final n in raw) {
+        m.putIfAbsent(n.toLowerCase(), () => n);
+      }
+    }
+    for (final e in performerAliases.entries) {
+      m.putIfAbsent(e.key.toLowerCase(), () => e.key);
+      m.putIfAbsent(e.value.toLowerCase(), () => e.value);
+    }
+    return m;
+  }
 
   void _applyToVideo(String v, FilenamePattern pat,
       {required bool overwrite, required Map<String, String> canon}) {

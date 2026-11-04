@@ -38,44 +38,39 @@ class _PerformersPageState extends State<PerformersPage> {
 
   Future<void> _rename(String old) async {
     final c = TextEditingController(text: old);
-    var keep = true;
     final ok = await showDialog<bool>(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setS) => AlertDialog(
-          title: Text('„$old“ umbenennen'),
-          content: SizedBox(
-            width: 420,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: c,
-                  autofocus: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Neuer Name',
-                    border: OutlineInputBorder(),
-                  ),
-                  onSubmitted: (_) => Navigator.pop(ctx, true),
+      builder: (ctx) => AlertDialog(
+        title: Text('„$old“ umbenennen'),
+        content: SizedBox(
+          width: 420,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(
+                controller: c,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'Neuer Name',
+                  border: OutlineInputBorder(),
                 ),
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  controlAffinity: ListTileControlAffinity.leading,
-                  title: const Text('Alten Namen als Synonym behalten'),
-                  subtitle: const Text(
-                    'Dann wird er bei späteren Eingaben und Importen automatisch zum neuen Namen.',
-                  ),
-                  value: keep,
-                  onChanged: (v) => setS(() => keep = v ?? true),
-                ),
-              ],
-            ),
+                onSubmitted: (_) => Navigator.pop(ctx, true),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Die ursprüngliche Schreibweise bleibt bei den Videos gespeichert und gilt '
+                'als Synonym. Unter „Synonyme“ kannst du die Umbenennung jederzeit '
+                'rückgängig machen.',
+                style: TextStyle(fontSize: 12),
+              ),
+            ],
           ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Abbrechen')),
-            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Umbenennen')),
-          ],
         ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Abbrechen')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Umbenennen')),
+        ],
       ),
     );
     final newName = c.text.trim();
@@ -87,12 +82,12 @@ class _PerformersPageState extends State<PerformersPage> {
       final merge = await _confirm(
         'Zusammenführen?',
         '„$newName“ gibt es schon (als „$conflict“). „$old“ wird mit „$conflict“ '
-        'zusammengeführt: Alle Videos von „$old“ gehören danach zu „$conflict“.',
+        'zusammengeführt. Das lässt sich unter „Synonyme“ wieder rückgängig machen.',
         yes: 'Zusammenführen',
       );
       if (!merge) return;
     }
-    final result = await store.renamePerformer(old, newName, keepOldAsAlias: keep);
+    final result = await store.renamePerformer(old, newName);
     if (mounted) setState(() => _selected = result);
   }
 
@@ -120,6 +115,8 @@ class _PerformersPageState extends State<PerformersPage> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
+                        'Die Namen bei den Videos bleiben unverändert gespeichert; ein Synonym zu entfernen '
+                        'trennt die Personen wieder. '
                         'Synonyme werden beim Eintragen und bei der Dateinamen-Auswertung '
                         'automatisch zu „$name“. Gibst du einen Namen ein, den es schon als '
                         'eigene Person gibt, werden beide zusammengeführt.',
@@ -134,7 +131,11 @@ class _PerformersPageState extends State<PerformersPage> {
                           runSpacing: 4,
                           children: [
                             for (final a in aliases)
-                              InputChip(label: Text(a), onDeleted: () => store.removeAlias(a)),
+                              InputChip(
+                                label: Text(a),
+                                deleteButtonTooltipMessage: 'Trennen: gilt wieder als eigene Person',
+                                onDeleted: () => store.removeAlias(a),
+                              ),
                           ],
                         ),
                       const SizedBox(height: 8),
@@ -181,7 +182,7 @@ class _PerformersPageState extends State<PerformersPage> {
                                       'Zusammenführen?',
                                       '„$from“ wird mit „$name“ zusammengeführt: Alle Videos von '
                                       '„$from“ gehören danach zu „$name“, und „$from“ wird als '
-                                      'Synonym gemerkt.',
+                                      'Synonym gemerkt. Das lässt sich unter „Synonyme“ wieder rückgängig machen.',
                                       yes: 'Zusammenführen',
                                     );
                                     if (!ok) return;
