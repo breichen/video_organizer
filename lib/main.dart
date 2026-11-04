@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:path/path.dart' as p;
 
+import 'folder_import_dialog.dart';
+import 'performers_page.dart';
 import 'player_page.dart';
 import 'store.dart';
 import 'supercut_page.dart';
@@ -42,11 +44,42 @@ class LibraryPage extends StatefulWidget {
 
 class _LibraryPageState extends State<LibraryPage> {
   String _filter = '';
+  String? _videoTagFilter;
   Store get store => widget.store;
 
   Future<void> _addFolder() async {
     final dir = await FilePicker.platform.getDirectoryPath();
-    if (dir != null) await store.addFolder(dir);
+    if (dir == null || !mounted) return;
+    final samples = await store.sampleVideos(dir);
+    if (!mounted) return;
+    final res = await showPatternDialog(
+      context,
+      folder: dir,
+      samples: samples,
+      isNew: true,
+    );
+    if (res == null) return; // abgebrochen
+    await store.addFolder(dir, pattern: res.pattern, series: res.series);
+  }
+
+  Future<void> _editPattern(String folder) async {
+    final samples = await store.sampleVideos(folder);
+    if (!mounted) return;
+    final res = await showPatternDialog(
+      context,
+      folder: folder,
+      samples: samples,
+      initial: store.patternFor(folder),
+      initialSeries: store.seriesForFolder(folder),
+      isNew: false,
+    );
+    if (res == null) return;
+    await store.setFolderRules(
+      folder,
+      pattern: res.pattern,
+      series: res.series,
+      overwrite: res.overwrite,
+    );
   }
 
   @override
@@ -54,13 +87,25 @@ class _LibraryPageState extends State<LibraryPage> {
     return ListenableBuilder(
       listenable: store,
       builder: (context, _) {
+        final activeTag =
+            store.allVideoTags.contains(_videoTagFilter) ? _videoTagFilter : null;
         final videos = store.videos
-            .where((v) => p.basename(v).toLowerCase().contains(_filter.toLowerCase()))
+            .where((v) =>
+                store.matchesSearch(v, _filter) &&
+                (activeTag == null || store.videoTagsFor(v).contains(activeTag)))
             .toList();
         return Scaffold(
           appBar: AppBar(
             title: const Text('Video-Organizer'),
             actions: [
+              TextButton.icon(
+                onPressed: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => PerformersPage(store: store)),
+                ),
+                icon: const Icon(Icons.people),
+                label: const Text('DarstellerInnen'),
+              ),
               IconButton(
                 tooltip: 'Ordner neu einlesen',
                 onPressed: store.scan,
@@ -100,10 +145,27 @@ class _LibraryPageState extends State<LibraryPage> {
                             ListTile(
                               dense: true,
                               title: Text(f, maxLines: 2, overflow: TextOverflow.ellipsis),
-                              trailing: IconButton(
-                                tooltip: 'Ordner entfernen',
-                                icon: const Icon(Icons.close),
-                                onPressed: () => store.removeFolder(f),
+                              subtitle: (store.patternFor(f) != null || store.seriesForFolder(f).isNotEmpty)
+                                  ? Text([
+                                      if (store.seriesForFolder(f).isNotEmpty)
+                                        'Serie: ${store.seriesForFolder(f)}',
+                                      if (store.patternFor(f) != null) 'Dateinamen-Auswertung aktiv',
+                                    ].join(' · '))
+                                  : null,
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    tooltip: 'Serie & Dateinamen-Auswertung einstellen',
+                                    icon: const Icon(Icons.tune),
+                                    onPressed: () => _editPattern(f),
+                                  ),
+                                  IconButton(
+                                    tooltip: 'Ordner entfernen',
+                                    icon: const Icon(Icons.close),
+                                    onPressed: () => store.removeFolder(f),
+                                  ),
+                                ],
                               ),
                             ),
                         ],
@@ -121,13 +183,32 @@ class _LibraryPageState extends State<LibraryPage> {
                       child: TextField(
                         decoration: const InputDecoration(
                           prefixIcon: Icon(Icons.search),
-                          hintText: 'Videos filtern…',
+                          hintText: 'Videos suchen (Titel, Serie, Datei, DarstellerIn)…',
                           border: OutlineInputBorder(),
                           isDense: true,
                         ),
                         onChanged: (v) => setState(() => _filter = v),
                       ),
                     ),
+                    if (store.allVideoTags.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Wrap(
+                            spacing: 6,
+                            children: [
+                              for (final t in store.allVideoTags)
+                                FilterChip(
+                                  label: Text(t),
+                                  selected: activeTag == t,
+                                  onSelected: (sel) =>
+                                      setState(() => _videoTagFilter = sel ? t : null),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
                     if (store.scanning) const LinearProgressIndicator(),
                     Expanded(
                       child: videos.isEmpty
@@ -143,9 +224,43 @@ class _LibraryPageState extends State<LibraryPage> {
                                 final n = store.segmentsFor(v).length;
                                 return ListTile(
                                   leading: const Icon(Icons.movie),
-                                  title: Text(p.basename(v)),
-                                  subtitle: Text(p.dirname(v),
-                                      maxLines: 1, overflow: TextOverflow.ellipsis),
+                                  title: Text(store.displayName(v)),
+                                  subtitle: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        store.titleFor(v).isNotEmpty
+                                            ? '${p.basename(v)} · ${p.dirname(v)}'
+                                            : p.dirname(v),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      if (store.seriesFor(v).isNotEmpty)
+                                        Text(
+                                          'Serie: ${store.seriesFor(v)}',
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      if (store.performersFor(v).isNotEmpty)
+                                        Text(
+                                          store.performersFor(v).join(', '),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(fontStyle: FontStyle.italic),
+                                        ),
+                                      if (store.videoTagsFor(v).isNotEmpty)
+                                        Wrap(
+                                          spacing: 4,
+                                          children: [
+                                            for (final t in store.videoTagsFor(v))
+                                              Chip(
+                                                label: Text(t),
+                                                visualDensity: VisualDensity.compact,
+                                              ),
+                                          ],
+                                        ),
+                                    ],
+                                  ),
                                   trailing: n > 0 ? Chip(label: Text('$n Intervalle')) : null,
                                   onTap: () => Navigator.push(
                                     context,

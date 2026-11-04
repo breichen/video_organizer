@@ -8,11 +8,15 @@ import 'package:path/path.dart' as p;
 
 import 'models.dart';
 import 'store.dart';
+import 'widgets.dart';
 
 /// Spielt zufällig gemischte, gut bewertete Intervalle zu einem Tag am Stück ab.
 class SupercutPage extends StatefulWidget {
   final Store store;
-  const SupercutPage({super.key, required this.store});
+
+  /// Vorauswahl für den DarstellerInnen-Filter ('' = alle).
+  final String initialPerformer;
+  const SupercutPage({super.key, required this.store, this.initialPerformer = ''});
 
   @override
   State<SupercutPage> createState() => _SupercutPageState();
@@ -26,7 +30,11 @@ class _SupercutPageState extends State<SupercutPage> {
   StreamSubscription<bool>? _doneSub;
 
   String? _tag;
+  String _folder = ''; // '' = alle Ordner
+  String _videoTag = ''; // '' = alle Videos
+  String _performer = ''; // '' = alle DarstellerInnen
   int _minRating = 4;
+  DateTime _lastIndexChange = DateTime.now();
   double _count = 10;
 
   List<Segment> _queue = [];
@@ -39,11 +47,26 @@ class _SupercutPageState extends State<SupercutPage> {
     super.initState();
     final tags = widget.store.allTags;
     if (tags.isNotEmpty) _tag = tags.first;
+    _performer = widget.initialPerformer;
+    player.setVolume(widget.store.volume);
     _plSub = player.stream.playlist.listen((pl) {
-      if (_running && mounted && pl.index != _index) setState(() => _index = pl.index);
+      if (_running && mounted && pl.index != _index) {
+        setState(() {
+          _index = pl.index;
+          _finished = false;
+          _lastIndexChange = DateTime.now();
+        });
+      }
     });
+    // Der Player meldet "completed" nach JEDEM Clip (wegen Media.end), nicht nur am
+    // Ende der Playlist. Fertig ist der Zusammenschnitt erst nach dem LETZTEN Clip.
+    // Meldungen kurz nach einem Clipwechsel gehören noch zum vorherigen Clip.
     _doneSub = player.stream.completed.listen((c) {
-      if (c && _running && mounted) setState(() => _finished = true);
+      if (!c || !_running || !mounted || _queue.isEmpty) return;
+      final isLast = _index >= _queue.length - 1;
+      final settled = DateTime.now().difference(_lastIndexChange) >
+          const Duration(milliseconds: 1000);
+      if (isLast && settled) setState(() => _finished = true);
     });
   }
 
@@ -55,9 +78,19 @@ class _SupercutPageState extends State<SupercutPage> {
     super.dispose();
   }
 
-  List<Segment> get _matches => widget.store.segments
-      .where((s) => s.tags.contains(_tag) && s.rating >= _minRating)
-      .toList();
+  List<Segment> get _matches => widget.store.segments.where((s) {
+        if (!s.tags.contains(_tag) || s.rating < _minRating) return false;
+        if (_folder.isNotEmpty && !p.isWithin(_folder, s.videoPath)) return false;
+        if (_videoTag.isNotEmpty &&
+            !widget.store.videoTagsFor(s.videoPath).contains(_videoTag)) {
+          return false;
+        }
+        if (_performer.isNotEmpty &&
+            !widget.store.performersFor(s.videoPath).contains(_performer)) {
+          return false;
+        }
+        return true;
+      }).toList();
 
   Future<void> _startShow() async {
     final list = _matches.where((s) => File(s.videoPath).existsSync()).toList()..shuffle();
@@ -72,6 +105,7 @@ class _SupercutPageState extends State<SupercutPage> {
       _index = 0;
       _finished = false;
       _running = true;
+      _lastIndexChange = DateTime.now();
     });
     await player.setPlaylistMode(PlaylistMode.none);
     await player.open(
@@ -101,7 +135,42 @@ class _SupercutPageState extends State<SupercutPage> {
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
                       DropdownMenu<String>(
-                        label: const Text('Tag'),
+                        width: 300,
+                        label: const Text('Ordner'),
+                        initialSelection: _folder,
+                        dropdownMenuEntries: [
+                          const DropdownMenuEntry(value: '', label: 'Alle Ordner'),
+                          for (final f in widget.store.folders)
+                            DropdownMenuEntry(value: f, label: f),
+                        ],
+                        onSelected: (f) => setState(() => _folder = f ?? ''),
+                      ),
+                      if (widget.store.allVideoTags.isNotEmpty)
+                        DropdownMenu<String>(
+                          label: const Text('Video-Tag'),
+                          initialSelection: _videoTag,
+                          dropdownMenuEntries: [
+                            const DropdownMenuEntry(value: '', label: 'Alle Videos'),
+                            for (final t in widget.store.allVideoTags)
+                              DropdownMenuEntry(value: t, label: t),
+                          ],
+                          onSelected: (t) => setState(() => _videoTag = t ?? ''),
+                        ),
+                      if (widget.store.allPerformers.isNotEmpty)
+                        DropdownMenu<String>(
+                          width: 260,
+                          label: const Text('DarstellerIn'),
+                          initialSelection: _performer,
+                          enableFilter: true,
+                          dropdownMenuEntries: [
+                            const DropdownMenuEntry(value: '', label: 'Alle DarstellerInnen'),
+                            for (final n in widget.store.allPerformers)
+                              DropdownMenuEntry(value: n, label: n),
+                          ],
+                          onSelected: (n) => setState(() => _performer = n ?? ''),
+                        ),
+                      DropdownMenu<String>(
+                        label: const Text('Szenen-Tag'),
                         initialSelection: _tag,
                         dropdownMenuEntries: [
                           for (final t in tags) DropdownMenuEntry(value: t, label: t),
@@ -213,6 +282,8 @@ class _SupercutPageState extends State<SupercutPage> {
                           icon: const Icon(Icons.skip_next),
                           onPressed: player.next,
                         ),
+                        const SizedBox(width: 32),
+                        VolumeControl(player: player, store: widget.store),
                       ],
                     ),
                   ),
@@ -224,6 +295,8 @@ class _SupercutPageState extends State<SupercutPage> {
   Widget _infoBox() {
     if (_queue.isEmpty) return const SizedBox.shrink();
     final s = _queue[_index.clamp(0, _queue.length - 1)];
+    final names = widget.store.performersFor(s.videoPath);
+    final who = names.isEmpty ? '' : '${names.join(', ')} · ';
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
@@ -231,8 +304,8 @@ class _SupercutPageState extends State<SupercutPage> {
         borderRadius: BorderRadius.circular(8),
       ),
       child: Text(
-        'Szene ${_index + 1}/${_queue.length} · ${p.basename(s.videoPath)}\n'
-        '${s.tags.join(', ')} · ${'★' * s.rating}  (${fmt(s.start)}–${fmt(s.end)})',
+        'Szene ${_index + 1}/${_queue.length} · ${widget.store.displayName(s.videoPath)}\n'
+        '$who${s.tags.join(', ')} · ${'★' * s.rating}  (${fmt(s.start)}–${fmt(s.end)})',
         style: const TextStyle(color: Colors.white),
       ),
     );
